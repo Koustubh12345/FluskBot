@@ -7,16 +7,17 @@ from flask import Flask, request, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
 from telegram import Update, Bot
 from telegram.ext import (
-    Dispatcher,
+    Application,
     CommandHandler,
     MessageHandler,
-    filters,
-    CallbackContext
+    ContextTypes,
+    filters
 )
 
 # --- Configuration ---
 TELEGRAM_TOKEN = "8379296931:AAEn1fQnSl4VWsj1ApAvzt7Jvx4vMlL6bgo"
-WEBHOOK_URL = "https://fluskbot.onrender.com"  # IMPORTANT: Replace with your actual Render URL
+# IMPORTANT: This URL is for your webhook. It must be your live Render URL.
+WEBHOOK_URL = "https://fluskbot.onrender.com/webhook" 
 PORT = int(os.environ.get('PORT', '5000'))
 UPLOAD_FOLDER = 'uploads'
 MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # Safer max file size: 50MB
@@ -35,7 +36,7 @@ app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
 
 # Initialize Telegram bot
 bot = Bot(token=TELEGRAM_TOKEN)
-dispatcher = Dispatcher(bot, None, use_context=True)
+application = Application.builder().token(TELEGRAM_TOKEN).build()
 
 # --- File Utilities ---
 def allowed_file(filename):
@@ -43,20 +44,20 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 # --- Telegram Bot Handlers ---
-def start(update: Update, context: CallbackContext) -> None:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message."""
-    update.message.reply_text('Hi! Send me any file, and I will give you a permanent download link.')
+    await update.message.reply_text('Hi! Send me any file, and I will give you a permanent download link.')
 
-def handle_file(update: Update, context: CallbackContext, file_object, file_name: str, mime_type: str) -> None:
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_object, file_name: str, mime_type: str) -> None:
     """Generic handler for all file types."""
     
-    processing_message = update.message.reply_text('Processing your file...')
+    processing_message = await update.message.reply_text('Processing your file...')
     
     file_id = file_object.file_id
     
     try:
         # Get file path from Telegram
-        file_info = bot.get_file(file_id)
+        file_info = await context.bot.get_file(file_id)
         file_path = file_info.file_path
         
         # Download file from Telegram's servers
@@ -78,38 +79,38 @@ def handle_file(update: Update, context: CallbackContext, file_object, file_name
             download_url = f"{request.host_url}download/{unique_filename}"
             
             # Edit the processing message with the download link
-            bot.edit_message_text(
-                chat_id=update.message.chat_id,
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
                 message_id=processing_message.message_id,
                 text=f"✅ File uploaded successfully!\n\n📁 **File**: {file_name}\n🔗 [Download Link]({download_url})",
                 parse_mode='Markdown'
             )
             logger.info(f"File '{file_name}' saved and link generated: {download_url}")
         else:
-            bot.edit_message_text(
-                chat_id=update.message.chat_id,
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
                 message_id=processing_message.message_id,
                 text="❌ Error downloading file from Telegram"
             )
     except Exception as e:
         logger.error(f"Error handling file: {e}", exc_info=True)
-        bot.edit_message_text(
-            chat_id=update.message.chat_id,
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
             message_id=processing_message.message_id,
             text=f"❌ An error occurred: {str(e)}"
         )
 
-def handle_document(update: Update, context: CallbackContext) -> None:
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     file = update.message.document
-    handle_file(update, context, file, file.file_name, file.mime_type)
+    await handle_file(update, context, file, file.file_name, file.mime_type)
 
-def handle_photo(update: Update, context: CallbackContext) -> None:
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     photo = update.message.photo[-1]
-    handle_file(update, context, photo, "photo.jpg", 'image/jpeg')
+    await handle_file(update, context, photo, "photo.jpg", 'image/jpeg')
 
-def handle_video(update: Update, context: CallbackContext) -> None:
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     video = update.message.video
-    handle_file(update, context, video, video.file_name or "video.mp4", video.mime_type)
+    await handle_file(update, context, video, video.file_name or "video.mp4", video.mime_type)
 
 # --- Flask Routes ---
 @app.route('/download/<filename>', methods=['GET'])
@@ -127,18 +128,20 @@ def webhook():
     """Handle incoming Telegram updates."""
     if request.method == "POST":
         update = Update.de_json(request.get_json(force=True), bot)
-        dispatcher.process_update(update)
+        application.process_update(update)
     return 'ok'
 
 # --- Main entry point ---
 if __name__ == '__main__':
-    # Add handlers to the dispatcher
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(MessageHandler(filters.document, handle_document))
-    dispatcher.add_handler(MessageHandler(filters.photo, handle_photo))
-    dispatcher.add_handler(MessageHandler(filters.video, handle_video))
+    # Add handlers to the application
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(MessageHandler(filters.VIDEO, handle_video))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    application.add_handler(MessageHandler(filters.AUDIO, handle_file))
 
     # Set the webhook URL
+    # This must be done once when the app is started
     bot.setWebhook(WEBHOOK_URL)
     logger.info(f"Webhook set to: {WEBHOOK_URL}")
     
